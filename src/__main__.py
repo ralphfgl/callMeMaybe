@@ -158,7 +158,9 @@ def main() -> None:
     param_types: dict[str, dict[str, Any]] = dict()
     for fn in raw_functions:
         try:
+            # `func = FunctionDef(**fn)`-> become `FunctionDef(name="search", parameters={"query":{"type":"string"}, "limit": {"type": "integer"}} (parameter is a Dict[str, Dict[str, str]])
             func = FunctionDef(**fn)
+
             allowed_fn_names.append(func.name)
             func_params[func.name] = len(func.parameters)
 
