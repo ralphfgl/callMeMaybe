@@ -1,0 +1,715 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+__init__.py
+__main__.py
+vocab_parser.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="__init__.py">
+
+</file>
+
+<file path="__main__.py">
+import argparse
+import json
+import sys
+from pydantic import BaseModel, ValidationError, ConfigDict
+from pydantic.dataclasses import dataclass
+import pathlib
+from llm_sdk import Small_LLM_Model  # type: ignore
+from src.vocab_parser import generate_constrained_json
+from datetime import datetime
+import string
+from rich import print_json
+import numpy as np
+from typing import Any, Dict, List, Tuple
+
+
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+class MaskCache:
+    """Cache structure to hold the LLM model instance and pre-computed data.
+
+    This avoids recalculating valid tokens or dictionaries on each pass.
+    """
+
+    model: Any
+    vocab_dict: Dict[int, str]
+
+    allowed_fn: List[str]
+    raw_functions: List[Dict[str, Any]]  # Needed for schema_hints
+    func_params: Dict[str, int]
+    param_types: Dict[str, Dict[str, Any]]
+
+    p4_mask: np.ndarray[Any, Any]
+    p4_numbers_only: np.ndarray[Any, Any]
+    p4_no_comma: np.ndarray[Any, Any]
+    mini_dict: List[Tuple[int, str]]
+    clean_dict_items: List[Tuple[int, str]]
+
+
+class FunctionDef(BaseModel):
+    """Pydantic model representing a function definition schema."""
+
+    name: str
+    description: str
+    parameters: Dict[str, Any]
+    returns: Dict[str, Any]
+
+
+class FunctionCallResult(BaseModel):
+    """Pydantic model representing a generated function call result."""
+
+    prompt: str
+    name: str
+    parameters: Dict[str, Any]
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments for the application.
+
+    Returns:
+        argparse.Namespace: The parsed command line arguments.
+    """
+    parser = argparse.ArgumentParser(
+        prog="CallMeMaybe",
+        description="Call Me Maybe: LLM Function Calling Tool",
+        usage="uv run python -m src [--functions_definition "
+        "<function_definition_file>] [--input <input_file>] "
+        "[--output <output_file>]",
+    )
+
+    parser.add_argument(
+        "--functions_definition",
+        metavar="",
+        type=str,
+        default="data/input/functions_definition.json",
+        help="Path to JSON file containing the functions definitions.",
+    )
+
+    parser.add_argument(
+        "--input",
+        metavar="",
+        type=str,
+        default="data/input/function_calling_tests.json",
+        help="Path to the file containing the prompts.",
+    )
+
+    parser.add_argument(
+        "--output",
+        metavar="",
+        type=str,
+        default="data/output/function_calling_results.json",
+        help="Path to the JSON output file.",
+    )
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-0.6B",
+        help="HuggingFace Model ID",
+    )
+
+    args = parser.parse_args()
+    return args
+
+
+def load_json_file(filename: str) -> Any:
+    """Load and parse a JSON file.
+
+    Args:
+        filename (str): The path to the JSON file to load.
+
+    Returns:
+        Any: The parsed JSON data.
+
+    Raises:
+        SystemExit: If the file is not found, cannot be parsed,
+            or has permission issues.
+    """
+
+    if not pathlib.Path(filename).is_file():
+        raise SystemExit(
+            f"This file {filename} is not found, or it is a directory."
+        )
+
+    try:
+        with open(filename, "r") as file:
+            json_data = json.load(file)
+
+    except json.JSONDecodeError:
+        print(
+            "The JSON file is invalid or corrupted. "
+            "A required key or value is missing.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    except PermissionError:
+        print(f"Permission denied in this file {filename}", file=sys.stderr)
+        sys.exit(1)
+
+    except Exception as e:
+        print(f"An error occured.\nDetails: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    return json_data
+
+
+def main() -> None:
+    """Main execution block.
+
+    Orchestrates loading models, creating masks, and running prompts.
+    """
+    args = parse_arguments()
+
+    raw_functions: list[dict[str, Any]] = load_json_file(
+        args.functions_definition
+    )
+    raw_prompts: list[dict[str, Any]] = load_json_file(args.input)
+
+    allowed_fn_names: list[str] = []
+
+    model = Small_LLM_Model(model_name=args.model)
+
+    start_time = datetime.now()
+    vocab_file = model.get_path_to_vocab_file()
+    raw_vocab: dict[str, int] = load_json_file(vocab_file)
+
+    vocab_dict: dict[int, str] = {
+        v: k.replace("Ġ", " ") for k, v in raw_vocab.items()
+    }
+
+    printable_set: set[str] = set(string.printable)
+
+    # Filter the tokens, to keep just the valid tokens (ids).
+    valid_ids: list[int] = [
+        token_id
+        for token_id, token_str in vocab_dict.items()
+        if token_str and all(c in printable_set for c in token_str)
+    ]
+
+    # 2. strips out ~120,000 useless foreign tokens!
+    clean_dict_items: list[tuple[int, str]] = [
+        (k, v)
+        for k, v in vocab_dict.items()
+        if v and all(c in printable_set for c in v)
+    ]
+
+    func_params: dict[str, int] = dict()
+    param_types: dict[str, dict[str, Any]] = dict()
+    for fn in raw_functions:
+        try:
+            func = FunctionDef(**fn)
+            allowed_fn_names.append(func.name)
+            func_params[func.name] = len(func.parameters)
+
+            params = fn.get("parameters", {})
+            param_types[func.name] = {}
+
+            for param_key, details in params.items():
+                param_types[func.name][param_key] = details.get("type")
+
+        except ValidationError as e:
+            print(
+                "Validation failed: input data is invalid or incomplete.",
+                file=sys.stderr,
+            )
+            print(e.errors()[0])
+            sys.exit(1)
+
+        except Exception as e:
+            print(
+                f"An unexpected error occured.\nDetails: {e}", file=sys.stderr
+            )
+            sys.exit(1)
+
+    dummy_input_ids = model.encode("dummy").tolist()[0]
+    vocab_size = len(model.get_logits_from_input_ids(dummy_input_ids))
+
+    p4_mask = np.zeros(vocab_size, dtype=bool)
+    p4_mask[valid_ids] = True
+
+    p4_numbers_only = np.zeros(vocab_size, dtype=bool)
+    allowed_math_chars = set("0123456789.-, }")
+    for i, s in clean_dict_items:
+        if all(char in allowed_math_chars for char in s) or s == "null":
+            p4_numbers_only[i] = True
+
+    p4_no_comma = p4_mask.copy()
+    for i, s in clean_dict_items:
+        if "," in s:
+            p4_no_comma[i] = False
+
+    target_phrases = allowed_fn_names + ['{"name":"', '","parameters":{', "}"]
+    mini_dict = [
+        (i, s)
+        for i, s in clean_dict_items
+        if any(s in phrase for phrase in target_phrases)
+    ]
+
+    cache = MaskCache(
+        model=model,
+        vocab_dict=vocab_dict,
+        allowed_fn=allowed_fn_names,
+        raw_functions=raw_functions,
+        func_params=func_params,
+        param_types=param_types,
+        p4_mask=p4_mask,
+        p4_numbers_only=p4_numbers_only,
+        p4_no_comma=p4_no_comma,
+        mini_dict=mini_dict,
+        clean_dict_items=clean_dict_items,
+    )
+
+    final_results_list: list[dict[str, Any]] = []
+    for prompt in raw_prompts:
+        prompt_text: str = prompt["prompt"]
+
+        print(f"\nPrompt: {prompt_text}")
+
+        raw_json_string = generate_constrained_json(prompt_text, cache)
+
+        try:
+            json_str = raw_json_string
+            extracted_dict = json.loads(json_str)
+
+            fn_name = extracted_dict.get("name")
+            expected_params = {}
+            for fn in raw_functions:
+                if fn.get("name") == fn_name:
+                    expected_params = fn.get("parameters", {})
+                    break
+
+            if "parameters" in extracted_dict:
+                for key, val in extracted_dict["parameters"].items():
+                    if (
+                        key in expected_params
+                        and expected_params[key].get("type") == "number"
+                    ):
+                        if isinstance(val, int) and not isinstance(val, bool):
+                            extracted_dict["parameters"][key] = float(val)
+                    elif isinstance(val, str):
+                        extracted_dict["parameters"][key] = val.strip()
+
+            final_data = {
+                "prompt": prompt_text,
+                "name": extracted_dict["name"],
+                "parameters": extracted_dict["parameters"],
+            }
+
+            result = FunctionCallResult(**final_data)
+            final_results_list.append(result.model_dump())
+
+            print()
+            print_json(data=final_data)
+
+        except ValidationError as e:
+            print(
+                "Validation failed: output data is invalid or incomplete.",
+                file=sys.stderr,
+            )
+            print(e.errors()[0])
+            sys.exit(1)
+
+        except Exception as e:
+            print(
+                f"An unexpected error occured.\nDetails: {e}", file=sys.stderr
+            )
+            sys.exit(1)
+
+    output_file = pathlib.Path(args.output)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    pathlib.Path(args.output).touch(exist_ok=True)
+
+    if not output_file.is_file():
+        print(
+            f"This file '{args.output}' is not found, or it is a directory.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        with open(args.output, "w") as file:
+            json.dump(final_results_list, file, indent=4)
+
+    except PermissionError:
+        print(f"Permission denied in this file {args.output}", file=sys.stderr)
+        sys.exit(1)
+
+    except Exception as e:
+        print(f"An error occured.\nDetails: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    elapsed_time = datetime.now() - start_time
+    total_seconds = elapsed_time.total_seconds()
+    minutes = int(total_seconds // 60)
+    seconds = int(total_seconds % 60)
+
+    print(f"\nAll done in {minutes}m {seconds}s!")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+</file>
+
+<file path="vocab_parser.py">
+from typing import Any
+import json
+import numpy as np
+import string
+import re
+
+
+def get_allowed_chars(current_str: str, allowed_names: list[str]) -> list[str]:
+    """Determine the next valid characters based on the JSON string state.
+
+    Args:
+        current_str (str): The partially generated JSON string.
+        allowed_names (list[str]): List of valid function names.
+
+    Returns:
+        list[str]: A list of allowed character sequences for the next step.
+    """
+    # Phase 1
+    prefix = '{"name":"'
+    if len(current_str) < len(prefix):
+        return [prefix[len(current_str) :]]
+
+    # Phase 2: The function name
+    after_prefix = current_str[len(prefix) :]
+    if '"' not in after_prefix:
+        return [
+            name[len(after_prefix) :] + '"'
+            for name in allowed_names
+            if name.startswith(after_prefix)
+        ]
+
+    # Phase 3: The bridge
+    func_name = after_prefix.split('"')[0]
+    target = prefix + func_name + '","parameters":{'
+    if len(current_str) < len(target):
+        return [target[len(current_str) :]]
+
+    # Phase 4: The arguments
+    return list(string.printable)
+
+
+def generate_constrained_json(prompt_text: str, cache: Any) -> str:
+    """Generate a valid function call JSON using constrained decoding.
+
+    Args:
+        prompt_text (str): The natural language user prompt.
+        cache (Any): MaskCache instance with model and pre-computed masks.
+
+    Returns:
+        str: The generated valid JSON string representing the function call.
+    """
+
+    optimized_schemas = []
+    for f in cache.raw_functions:
+        optimized_schemas.append(
+            {
+                "name": f["name"],
+                "description": f.get("description", ""),
+                "parameters": f.get("parameters", {}),
+            }
+        )
+
+    # Remove ALL spaces from JSON string
+    schema_hints = json.dumps(optimized_schemas, separators=(",", ":"))
+
+    prompt = (
+        f"System: You are a strict API. Output ONLY valid JSON matching "
+        f"these schemas: {schema_hints}\n"
+        r"Rule: For the regex field, NEVER output literal matches. "
+        r"Always use proper regex sets "
+        r"(e.g. '[aeiouAEIOU]', '[0-9]+', '\\bword\\b'). "
+        r"For replacement, if asked for a character (e.g. asterisks), "
+        r"output EXACTLY ONE character (e.g. '*')."
+        "\n"
+        f"User: {prompt_text}\n"
+        "Tool Call: "
+    )
+
+    input_ids = cache.model.encode(prompt).tolist()[0]
+    vocab_size = len(cache.model.get_logits_from_input_ids(input_ids))
+
+    current_str = ""
+
+    prefix = '{"name":"'
+    current_str = prefix
+
+    input_ids.extend(cache.model.encode(prefix).tolist()[0])
+    bridge_injected = False
+
+    max_tokens = 150
+
+    while (
+        not current_str.replace(" ", "").replace("\n", "").endswith("}}")
+        and len(input_ids) < len(prompt) + max_tokens
+    ):
+        # Teleport
+        if prefix in current_str and '","parameters":{' not in current_str:
+            after_prefix = current_str.split(prefix)[1]
+            possible_names = [
+                n for n in cache.allowed_fn if n.startswith(after_prefix)
+            ]
+
+            if len(possible_names) == 1 and possible_names[0] != after_prefix:
+                remainder = possible_names[0][len(after_prefix) :] + '"'
+                current_str += remainder
+                input_ids.extend(cache.model.encode(remainder).tolist()[0])
+                continue
+
+        # Bridge Fast-Forward
+        if (
+            current_str.endswith('"')
+            and not bridge_injected
+            and prefix in current_str
+            and len(current_str) > len(prefix)
+        ):
+            bridge = ',"parameters":{'
+            current_str += bridge
+            input_ids.extend(cache.model.encode(bridge).tolist()[0])
+            bridge_injected = True
+
+            func_name = current_str.split('"name":"')[1].split('"')[0]
+            if cache.func_params.get(func_name, 99) == 0:
+                current_str += "}}"
+                break
+
+            active_schema = next(
+                (f for f in cache.raw_functions if f["name"] == func_name),
+                None,
+            )
+
+            if active_schema:
+                tiny_schema = json.dumps(
+                    [
+                        {
+                            "name": active_schema["name"],
+                            "description": active_schema.get(
+                                "description", ""
+                            ),
+                            "parameters": active_schema.get("parameters", {}),
+                        }
+                    ],
+                    separators=(",", ":"),
+                )
+
+                tiny_prompt = (
+                    f"System: Output valid JSON matching this schema: "
+                    f"{tiny_schema}\n"
+                    r"Rule: For the regex field, NEVER output "
+                    r"literal matches. "
+                    r"Always use proper regex sets "
+                    r'(e.g. "[aeiouAEIOU]", "[0-9]+", "\\bword\\b"). '
+                    r"For replacement, if asked for a character "
+                    r"(e.g. asterisks), output EXACTLY ONE character "
+                    r"(e.g. '*')."
+                    "\n"
+                    f"User: {prompt_text}\n"
+                    f"Tool Call: {current_str}"
+                )
+
+                input_ids = cache.model.encode(tiny_prompt).tolist()[0]
+            else:
+                input_ids.extend(cache.model.encode(bridge).tolist()[0])
+
+            continue
+
+        rules = get_allowed_chars(current_str, cache.allowed_fn)
+        logits = np.array(cache.model.get_logits_from_input_ids(input_ids))
+        mask = np.zeros(vocab_size, dtype=bool)
+
+        if len(rules) > 10:
+            # --- PHASE 4: THE QUOTA & TYPE SHIELD ---
+
+            match = re.search(r'"name"\s*:\s*"([^"]+)', current_str)
+            func_name = match.group(1) if match else ""
+
+            params_str = (
+                current_str.split('"parameters"')[1]
+                if '"parameters"' in current_str
+                else ""
+            )
+
+            if params_str:
+                in_string = False
+                last_structural_colon = -1
+                last_structural_comma = -1
+                last_structural_brace = -1
+
+                for i, char in enumerate(params_str):
+                    if char == '"':
+                        if i == 0 or params_str[i - 1] != "\\":
+                            in_string = not in_string
+                    elif not in_string:
+                        if char == ":":
+                            last_structural_colon = i
+                        elif char == ",":
+                            last_structural_comma = i
+                        elif char == "}":
+                            last_structural_brace = i
+
+                is_inside_value = (
+                    last_structural_colon > last_structural_comma
+                    and last_structural_colon > last_structural_brace
+                )
+
+                active_key = ""
+                if is_inside_value:
+                    keys_found = re.findall(r'"([^"]+)"\s*:', params_str)
+                    if keys_found:
+                        active_key = keys_found[-1]
+
+                expected_type = cache.param_types.get(func_name, {}).get(
+                    active_key, "Any"
+                )
+
+                param_count = len(re.findall(r'"([^"]+)"\s*:', params_str))
+                target_count = cache.func_params.get(func_name, 99)
+
+                # --- THE MASK ROUTER ---
+
+                if is_inside_value and expected_type == "number":
+                    mask = cache.p4_numbers_only.copy()
+
+                    if param_count == target_count:
+                        for i, s in cache.clean_dict_items:
+                            if "," in s:
+                                mask[i] = False
+
+                # String value state
+                elif is_inside_value and in_string:
+                    mask = cache.p4_mask.copy()
+
+                    if param_count == target_count:
+                        for i, s in cache.clean_dict_items:
+                            if '",' in s.replace(" ", ""):
+                                mask[i] = False
+
+                    if active_key == "regex":
+                        for i, s in cache.clean_dict_items:
+                            if " " in s:
+                                mask[i] = False
+
+                        if re.search(r'"regex"\s*:\s*"$', params_str):
+                            for i, s in cache.clean_dict_items:
+                                if not any(
+                                    s.startswith(c) for c in ["[", "\\"]
+                                ):
+                                    mask[i] = False
+
+                elif param_count == target_count:
+                    clean_str = current_str.strip()
+                    if clean_str.endswith('"'):
+                        current_str = clean_str + "}}"
+                        print(
+                            f"\rGenerating: {current_str}", end="", flush=True
+                        )
+                        break
+                    elif clean_str.endswith("}"):
+                        current_str = clean_str + "}"
+                        print(
+                            f"\rGenerating: {current_str}", end="", flush=True
+                        )
+                        break
+                    elif clean_str.endswith(","):
+                        current_str = clean_str[:-1] + "}}"
+                        print(
+                            f"\rGenerating: {current_str}", end="", flush=True
+                        )
+                        break
+                    else:
+                        mask = cache.p4_no_comma.copy()
+
+                else:
+                    mask = cache.p4_mask.copy()
+                    is_expecting_key = params_str.strip().endswith(
+                        "{"
+                    ) or params_str.strip().endswith(",")
+                    if is_expecting_key:
+                        for i, s in cache.clean_dict_items:
+                            cleaned = s.strip()
+                            if not (cleaned.startswith('"') or not cleaned):
+                                mask[i] = False
+
+        # Phase 1-3: Strict Spelling
+        else:
+            for i, s in cache.mini_dict:
+                if any(rule.startswith(s) for rule in rules):
+                    mask[i] = True
+
+        logits[~mask] = -np.inf
+
+        best_id = int(np.argmax(logits))
+        current_str += cache.vocab_dict.get(best_id, "")
+        input_ids.append(best_id)
+
+        if (
+            current_str.endswith('"')
+            and not bridge_injected
+            and prefix in current_str
+        ):
+            bridge = ',"parameters":{'
+            current_str += bridge
+            input_ids.extend(cache.model.encode(bridge).tolist()[0])
+            bridge_injected = True
+            continue
+
+        else:
+            print(f"\rGenerating: {current_str}", end="", flush=True)
+
+    print()
+    return current_str
+</file>
+
+</files>
