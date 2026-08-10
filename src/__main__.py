@@ -123,7 +123,10 @@ def main() -> None:
         args.functions_definition
     )
     raw_prompts: list[dict[str, Any]] = load_json_file(args.input)
+
+    # list of function (their names) that passes validation
     allowed_fn_names: list[str] = []
+
     model = Small_LLM_Model(model_name=args.model)
     start_time = datetime.now()
     # download model vocab file from Hugging face and return local path
@@ -149,6 +152,8 @@ def main() -> None:
         if v and all(c in printable_set for c in v)
     ]
     # FIX: END
+
+    #
     func_params: dict[str, int] = dict()
     param_types: dict[str, dict[str, Any]] = dict()
     for fn in raw_functions:
@@ -174,6 +179,8 @@ def main() -> None:
                 f"An unexpected error occured.\nDetails: {e}", file=sys.stderr
             )
             sys.exit(1)
+
+    #########
     dummy_input_ids = model.encode("dummy").tolist()[0]
     vocab_size = len(model.get_logits_from_input_ids(dummy_input_ids))
     p4_mask = np.zeros(vocab_size, dtype=bool)
