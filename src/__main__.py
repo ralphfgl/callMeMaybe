@@ -148,6 +148,7 @@ def main() -> None:
         for k, v in vocab_dict.items()
         if v and all(c in printable_set for c in v)
     ]
+    # FIX: END
     func_params: dict[str, int] = dict()
     param_types: dict[str, dict[str, Any]] = dict()
     for fn in raw_functions:
