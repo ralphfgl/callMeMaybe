@@ -126,19 +126,23 @@ def main() -> None:
     allowed_fn_names: list[str] = []
     model = Small_LLM_Model(model_name=args.model)
     start_time = datetime.now()
+    # download model vocab file from Hugging face and return local path
     vocab_file = model.get_path_to_vocab_file()
+    # reverse the vocabulary (dict token -> id become id->token)
     raw_vocab: dict[str, int] = load_json_file(vocab_file)
     vocab_dict: dict[int, str] = {
         v: k.replace("Ġ", " ") for k, v in raw_vocab.items()
     }
+    # create a set with printable chars
     printable_set: set[str] = set(string.printable)
-    # Filter the tokens, to keep just the valid tokens (ids).
+    # FIX: fusionne valids
+    # create a list of tokens ID whose token string contain only printable chars
     valid_ids: list[int] = [
         token_id
         for token_id, token_str in vocab_dict.items()
         if token_str and all(c in printable_set for c in token_str)
     ]
-    # 2. strips out ~120,000 useless foreign tokens!
+    # same thing as below but keeps the id
     clean_dict_items: list[tuple[int, str]] = [
         (k, v)
         for k, v in vocab_dict.items()
