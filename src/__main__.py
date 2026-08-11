@@ -6,7 +6,7 @@
 #    By: rfeghali <rfeghali@learner.42.tech>        +#+  +:+       +#+         #
 #                                                 +#+#+#+#+#+   +#+            #
 #    Created: 2026/08/11 17:54:44 by rfeghali          #+#    #+#              #
-#    Updated: 2026/08/11 18:43:58 by rfeghali         ###   ########.fr        #
+#    Updated: 2026/08/11 18:47:23 by rfeghali         ###   ########.fr        #
 #                                                                              #
 # **************************************************************************** #
 
@@ -309,9 +309,11 @@ def main() -> None:
                 "parameters": extracted_dict["parameters"],
             }
             result = FunctionCallResult(**final_data)
+            # add result to the list. result is a pydantic object, model.dump()
             final_results_list.append(result.model_dump())
 
             print()
+            # print json is a rich module function to pretty print json
             print_json(data=final_data)
         except ValidationError as e:
             print(
