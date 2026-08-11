@@ -1,3 +1,15 @@
+# **************************************************************************** #
+#                                                                              #
+#                                                         :::      ::::::::    #
+#    __main__.py                                        :+:      :+:    :+:    #
+#                                                     +:+ +:+         +:+      #
+#    By: rfeghali <rfeghali@learner.42.tech>        +#+  +:+       +#+         #
+#                                                 +#+#+#+#+#+   +#+            #
+#    Created: 2026/08/11 17:54:44 by rfeghali          #+#    #+#              #
+#    Updated: 2026/08/11 18:43:58 by rfeghali         ###   ########.fr        #
+#                                                                              #
+# **************************************************************************** #
+
 import argparse
 import json
 import sys
@@ -11,6 +23,24 @@ import string
 from rich import print_json
 import numpy as np
 from typing import Any, Dict, List, Tuple
+
+
+# WE NEED NOT TO USE PYDANTIC FOR THE VALIDATION OF NDARRAY OBJ
+# class MaskCache(BaseModel):
+#     """Cache structure to hold the LLM model instance and pre-computed data.
+#     This avoids recalculating valid tokens or dictionaries on each pass."""
+#
+#     model: Any
+#     vocab_dict: Dict[int, str]
+#     allowed_fn: List[str]
+#     raw_functions: List[Dict[str, Any]]
+#     func_params: Dict[str, int]
+#     param_types: Dict[str, Dict[str, Any]]
+#     p4_mask: np.ndarray[Any, Any]
+#     p4_numbers_only: np.ndarray[Any, Any]
+#     p4_no_comma: np.ndarray[Any, Any]
+#     mini_dict: List[Tuple[int, str]]
+#     clean_dict_items: List[Tuple[int, str]]
 
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -153,17 +183,21 @@ def main() -> None:
     ]
     # FIX: END
 
-    #
+    # fucntion param -> {name: number of parameter}
+    # param type -> {name: {param1:type, param2:type, ...}}
     func_params: dict[str, int] = dict()
     param_types: dict[str, dict[str, Any]] = dict()
+    # raw function is the json loaded from the file, as a list of dict
     for fn in raw_functions:
         try:
             # `func = FunctionDef(**fn)`-> become `FunctionDef(name="search", parameters={"query":{"type":"string"}, "limit": {"type": "integer"}} (parameter is a Dict[str, Dict[str, str]])
             func = FunctionDef(**fn)
 
             allowed_fn_names.append(func.name)
+            # count parameters
             func_params[func.name] = len(func.parameters)
-
+            # params equal parameter from the dict of json file or empty dict if "parameter" key not found
+            # second argument of get is fallback
             params = fn.get("parameters", {})
             param_types[func.name] = {}
 
@@ -183,25 +217,41 @@ def main() -> None:
             sys.exit(1)
 
     #########
+    # tolist() convert an array to an ordinary python list
+    # encode -> ask tokenizer to turn str into token IDs
+    # dummy input is then use to call get_logit and discover vocab size
+    # get_logits takes a list of token ids and return logits for next token
     dummy_input_ids = model.encode("dummy").tolist()[0]
     vocab_size = len(model.get_logits_from_input_ids(dummy_input_ids))
+
+    # create a boolean mask, valid_ids where computed before (printable chars)
+    # FIX: CHANGE the name of the mask (p4)
     p4_mask = np.zeros(vocab_size, dtype=bool)
     p4_mask[valid_ids] = True
+    # stricter mask, only math symbol, number or json separator or closing syntax or "null" (cause json allow null)
+    # may be nice to check if vocab has a "null" as one token
     p4_numbers_only = np.zeros(vocab_size, dtype=bool)
     allowed_math_chars = set("0123456789.-, }")
     for i, s in clean_dict_items:
         if all(char in allowed_math_chars for char in s) or s == "null":
             p4_numbers_only[i] = True
+    # copy the printable mask
     p4_no_comma = p4_mask.copy()
     for i, s in clean_dict_items:
         if "," in s:
             p4_no_comma[i] = False
+
+    # at the end we have 3 mask: valid_id, no_comma and math only
+
+    # mini dict is a small subset of the vocab containing tokens that appear inside function name or json syntax
     target_phrases = allowed_fn_names + ['{"name":"', '","parameters":{', "}"]
     mini_dict = [
         (i, s)
         for i, s in clean_dict_items
         if any(s in phrase for phrase in target_phrases)
     ]
+
+    # create a mask cache object
     cache = MaskCache(
         model=model,
         vocab_dict=vocab_dict,
@@ -215,30 +265,44 @@ def main() -> None:
         mini_dict=mini_dict,
         clean_dict_items=clean_dict_items,
     )
+
+    # empty result list
     final_results_list: list[dict[str, Any]] = []
     for prompt in raw_prompts:
         prompt_text: str = prompt["prompt"]
         print(f"\nPrompt: {prompt_text}")
+
+        # generate the constrained json with the cache (mask object)
         raw_json_string = generate_constrained_json(prompt_text, cache)
         try:
             json_str = raw_json_string
+            # json.loads -> takes a json text and convert it to python object
             extracted_dict = json.loads(json_str)
+            # extract function name, we use get() instead of indexing cause it return None and not an error if not found
             fn_name = extracted_dict.get("name")
             expected_params = {}
+            # check if the generated func name is in the list
             for fn in raw_functions:
                 if fn.get("name") == fn_name:
                     expected_params = fn.get("parameters", {})
                     break
+            # check if param key exist and extract
             if "parameters" in extracted_dict:
                 for key, val in extracted_dict["parameters"].items():
+                    # check if generated params exist in function definition
+                    # check if params is supposed to be a number
                     if (
                         key in expected_params
                         and expected_params[key].get("type") == "number"
                     ):
+                        # convert int to float (check if not bool cause bool in python is subclass of int)
+                        # NOTE: might want to change the auto convertion cause it might be considered heuristic
                         if isinstance(val, int) and not isinstance(val, bool):
                             extracted_dict["parameters"][key] = float(val)
+                    # strip whitespace from string
                     elif isinstance(val, str):
                         extracted_dict["parameters"][key] = val.strip()
+            # now we use indexing and not get, so if field missing at this point should raise a KeyError
             final_data = {
                 "prompt": prompt_text,
                 "name": extracted_dict["name"],
@@ -262,6 +326,8 @@ def main() -> None:
                 f"An unexpected error occured.\nDetails: {e}", file=sys.stderr
             )
             sys.exit(1)
+
+    ####
     output_file = pathlib.Path(args.output)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(args.output).touch(exist_ok=True)
