@@ -6,6 +6,7 @@ from pydantic.dataclasses import dataclass
 import pathlib
 from llm_sdk import Small_LLM_Model  # type: ignore
 from src.vocab_parser import generate_constrained_json
+from src.parsing import get_arguments
 from datetime import datetime
 import string
 from rich import print_json
@@ -66,46 +67,6 @@ class FunctionCallResult(BaseModel):
     parameters: Dict[str, Any]
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command line arguments for the application."""
-    parser = argparse.ArgumentParser(
-        prog="CallMeMaybe",
-        description="Call Me Maybe: LLM Function Calling Tool",
-        usage="uv run python -m src [--functions_definition "
-        "<function_definition_file>] [--input <input_file>] "
-        "[--output <output_file>]",
-    )
-    parser.add_argument(
-        "--functions_definition",
-        metavar="",
-        type=str,
-        default="data/input/functions_definition.json",
-        help="Path to JSON file containing the functions definitions.",
-    )
-    parser.add_argument(
-        "--input",
-        metavar="",
-        type=str,
-        default="data/input/function_calling_tests.json",
-        help="Path to the file containing the prompts.",
-    )
-    parser.add_argument(
-        "--output",
-        metavar="",
-        type=str,
-        default="data/output/function_calling_results.json",
-        help="Path to the JSON output file.",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="Qwen/Qwen3-0.6B",
-        help="HuggingFace Model ID",
-    )
-    args = parser.parse_args()
-    return args
-
-
 def load_json_file(filename: str) -> Any:
     """Load and parse a JSON file."""
 
@@ -136,7 +97,8 @@ def main() -> None:
     """Main execution block.
     Orchestrates loading models, creating masks, and running prompts."""
 
-    args = parse_arguments()
+    # args = parse_arguments()
+    args = get_arguments()
     raw_functions: list[dict[str, Any]] = load_json_file(
         args.functions_definition
     )

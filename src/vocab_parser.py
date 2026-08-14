@@ -11,17 +11,21 @@ def get_allowed_chars(current_str: str, allowed_names: list[str]) -> list[str]:
     Args:
         current_str (str): The partially generated JSON string.
         allowed_names (list[str]): List of valid function names.
-
     Returns:
         list[str]: A list of allowed character sequences for the next step.
     """
+
     # Phase 1
     prefix = '{"name":"'
+    # returns the characters of the prefix sequence that havent been generated yet
     if len(current_str) < len(prefix):
         return [prefix[len(current_str) :]]
 
     # Phase 2: The function name
+    # after prefix is chars generated after the prefix
     after_prefix = current_str[len(prefix) :]
+    # if function name is not completed
+    # we use a generator +
     if '"' not in after_prefix:
         return [
             name[len(after_prefix) :] + '"'
