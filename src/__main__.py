@@ -6,7 +6,7 @@
 #    By: rfeghali <rfeghali@learner.42.tech>        +#+  +:+       +#+         #
 #                                                 +#+#+#+#+#+   +#+            #
 #    Created: 2026/08/11 17:54:44 by rfeghali          #+#    #+#              #
-#    Updated: 2026/08/11 18:47:23 by rfeghali         ###   ########.fr        #
+#    Updated: 2026/08/11 20:01:34 by rfeghali         ###   ########.fr        #
 #                                                                              #
 # **************************************************************************** #
 
@@ -320,6 +320,7 @@ def main() -> None:
                 "Validation failed: output data is invalid or incomplete.",
                 file=sys.stderr,
             )
+            # print first validation error
             print(e.errors()[0])
             sys.exit(1)
 
