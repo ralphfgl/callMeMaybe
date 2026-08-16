@@ -25,7 +25,9 @@ def get_allowed_chars(current_str: str, allowed_names: list[str]) -> list[str]:
     # after prefix is chars generated after the prefix
     after_prefix = current_str[len(prefix) :]
     # if function name is not completed
-    # we use a generator +
+    # complete the generation based on function allowed names
+    # if there is multiple match, returns all valid continuation, the model will decide which one it will prefer
+    # and we restrict the model vocab with token that start with one of the string
     if '"' not in after_prefix:
         return [
             name[len(after_prefix) :] + '"'
@@ -34,12 +36,16 @@ def get_allowed_chars(current_str: str, allowed_names: list[str]) -> list[str]:
         ]
 
     # Phase 3: The bridge
+    # function name has been completed
+    # it split after last ", so [0] is the func name and [1] is empty
     func_name = after_prefix.split('"')[0]
+    # add bridge
     target = prefix + func_name + '","parameters":{'
     if len(current_str) < len(target):
         return [target[len(current_str) :]]
 
     # Phase 4: The arguments
+    # allow only printable chars
     return list(string.printable)
 
 
@@ -54,6 +60,7 @@ def generate_constrained_json(prompt_text: str, cache: Any) -> str:
         str: The generated valid JSON string representing the function call.
     """
 
+    # we put function name, description and parameter in optimize schema
     optimized_schemas = []
     for f in cache.raw_functions:
         optimized_schemas.append(
@@ -64,7 +71,7 @@ def generate_constrained_json(prompt_text: str, cache: Any) -> str:
             }
         )
 
-    # Remove ALL spaces from JSON string
+    # Remove ALL spaces from JSON string, so it has less token
     schema_hints = json.dumps(optimized_schemas, separators=(",", ":"))
 
     prompt = (
@@ -80,11 +87,15 @@ def generate_constrained_json(prompt_text: str, cache: Any) -> str:
         "Tool Call: "
     )
 
+    # tokenize the prompt
     input_ids = cache.model.encode(prompt).tolist()[0]
+    # get vocab size (all possible next token) to construct a mask
     vocab_size = len(cache.model.get_logits_from_input_ids(input_ids))
 
+    # no generated output in the beginning
     current_str = ""
 
+    # manually insert beginning
     prefix = '{"name":"'
     current_str = prefix
 
