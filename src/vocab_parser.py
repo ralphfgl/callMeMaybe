@@ -99,22 +99,26 @@ def generate_constrained_json(prompt_text: str, cache: Any) -> str:
     prefix = '{"name":"'
     current_str = prefix
 
+    # extend() -> builtin list method, add each element of another iterable (while append() whould just append a list as one element of the list [1, 2, 3, [4, 5]] )
     input_ids.extend(cache.model.encode(prefix).tolist()[0])
     bridge_injected = False
 
+    # prevent infinite generation
     max_tokens = 150
 
+    # it continue until either : json if finished (end with }} or max generation length is reached)
     while (
         not current_str.replace(" ", "").replace("\n", "").endswith("}}")
         and len(input_ids) < len(prompt) + max_tokens
     ):
-        # Teleport
+        # prefix completion using the known set of valid function name
         if prefix in current_str and '","parameters":{' not in current_str:
             after_prefix = current_str.split(prefix)[1]
             possible_names = [
                 n for n in cache.allowed_fn if n.startswith(after_prefix)
             ]
 
+            # second condition ensure not to do something unnecessary if the complete name has already been geenrated
             if len(possible_names) == 1 and possible_names[0] != after_prefix:
                 remainder = possible_names[0][len(after_prefix) :] + '"'
                 current_str += remainder
@@ -134,15 +138,27 @@ def generate_constrained_json(prompt_text: str, cache: Any) -> str:
             bridge_injected = True
 
             func_name = current_str.split('"name":"')[1].split('"')[0]
-            if cache.func_params.get(func_name, 99) == 0:
+            # 67 is a sentinel value, is returned if func_name is not found
+            # finish the json if the function has no params
+            if cache.func_params.get(func_name, 67) == 0:
                 current_str += "}}"
                 break
 
+            # generator expression with next, searching thru  a list
+            # return None if no match found (instead of rasingn error)
             active_schema = next(
                 (f for f in cache.raw_functions if f["name"] == func_name),
                 None,
             )
+            # NOTE: clearer but more verbose
+            # active_schema = None
+            # for f in cache.raw_functions:
+            #     if f["name"] == func_name:
+            #         active_schema = f
+            #         break
 
+            # switch from all the function to one active schema and update the prompt
+            # we completely refocus on the function params
             if active_schema:
                 tiny_schema = json.dumps(
                     [
@@ -178,28 +194,40 @@ def generate_constrained_json(prompt_text: str, cache: Any) -> str:
 
             continue
 
+        # determines what token are allowed next (and return a list)
         rules = get_allowed_chars(current_str, cache.allowed_fn)
         logits = np.array(cache.model.get_logits_from_input_ids(input_ids))
         mask = np.zeros(vocab_size, dtype=bool)
 
+        # if more than 10 allowed char, enter the quota and type shield
         if len(rules) > 10:
             # --- PHASE 4: THE QUOTA & TYPE SHIELD ---
 
+            # extract the current function name
+            # name -> whitespace -> : -> whitespace -> capture everything until next "
+            # .search(pattern, string)
             match = re.search(r'"name"\s*:\s*"([^"]+)', current_str)
+            # group is used with regex match objects
+            # .group(n) -> return nth group captured
             func_name = match.group(1) if match else ""
 
+            # split at parameter and take what after
             params_str = (
                 current_str.split('"parameters"')[1]
                 if '"parameters"' in current_str
                 else ""
             )
 
+            # parse parameter char by char
+            # we want to track if the model is prompting a value or has finished and is waiting for a key
             if params_str:
                 in_string = False
                 last_structural_colon = -1
                 last_structural_comma = -1
                 last_structural_brace = -1
 
+                # track position of structural chars, while ignoring those inside string literal
+                # in string logic toggle when an unescaped " is found
                 for i, char in enumerate(params_str):
                     if char == '"':
                         if i == 0 or params_str[i - 1] != "\\":
@@ -212,6 +240,7 @@ def generate_constrained_json(prompt_text: str, cache: Any) -> str:
                         elif char == "}":
                             last_structural_brace = i
 
+                # determine if we are in a value
                 is_inside_value = (
                     last_structural_colon > last_structural_comma
                     and last_structural_colon > last_structural_brace
